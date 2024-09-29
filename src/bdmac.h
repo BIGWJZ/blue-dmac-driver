@@ -27,12 +27,7 @@
 #include <linux/vmalloc.h>
 #include <linux/workqueue.h>
 
-#include "bdma_cdev.h"
-
-#define MAGIC_ENGINE 0xEEEEEEEEUL
-#define MAGIC_DEVICE 0xDDDDDDDDUL
-#define MAGIC_CHAR 0xCCCCCCCCUL
-#define MAGIC_BITSTREAM 0xBBBBBBBBUL
+// #include "bdma_cdev.h"
 
 struct bdma_dev {
   struct pci_dev *pdev;  /* pci device struct from probe() */
