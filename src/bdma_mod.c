@@ -74,9 +74,6 @@ static int bdma_probe(struct pci_dev *pdev, const struct pci_device_id *id) {
     goto err_out;
   }
 
-  // TODO: allocate poll_result_va, write to hw
-  // engine_init(bdev);
-
   rv = bdev_create_interfaces(bdev);
   if (rv)
     goto err_out;
@@ -90,6 +87,8 @@ err_out:
 
 static void bdma_remove(struct pci_dev *pdev) {
   struct bdma_dev *bdev;
+
+  pr_info("Debug: Enter remove function!\n");
 
   if (!pdev)
     return;
@@ -124,8 +123,8 @@ static int bdma_init(void) {
 }
 
 static void bdma_exit(void) {
-  pr_info("bdma unregister.\n");
   pci_unregister_driver(&pci_driver);
+  pr_info("bdma unregister.\n");
 }
 
 module_init(bdma_init);
