@@ -81,10 +81,10 @@ int main(int argc, char *argv[]) {
   memset(dest_ptr, 'b', MR_SIZE / 2);
 
   printf("Dma Read @:%p, data:%c \n", src_ptr, *src_ptr);
-  rv = test_transfer(fd, src_ptr, MR_SIZE / 2, BDMA_READ);
+  rv = test_transfer(fd, src_ptr, 8, BDMA_READ);
 
   printf("Dma Write @:%p, origin data:%c \n", dest_ptr, *dest_ptr);
-  rv = test_transfer(fd, dest_ptr, MR_SIZE / 2, BDMA_WRITE);
+  rv = test_transfer(fd, dest_ptr, 8, BDMA_WRITE);
 
   // Just for testing
   sleep(5);

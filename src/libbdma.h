@@ -82,13 +82,14 @@ struct bdma_engine {
   int id;
   int channel;
   struct engine_regs *regs;
-  u8 *pa_list;
+  u8 *pa_bus_addr;
   struct bdma_dev *bdev;
 
   u8 *poll_virt_addr;
   dma_addr_t poll_bus_addr;
 
   struct mem_region region;
+  dma_addr_t pa_list[BDMA_MAX_MR_PAGE_NUM];
   int got_registerd_region;
 
   spinlock_t lock;

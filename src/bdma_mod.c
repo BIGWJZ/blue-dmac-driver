@@ -73,6 +73,7 @@ static int bdma_probe(struct pci_dev *pdev, const struct pci_device_id *id) {
     rv = -EINVAL;
     goto err_out;
   }
+  dev_set_drvdata(&pdev->dev, bdev);
 
   rv = bdev_create_interfaces(bdev);
   if (rv)

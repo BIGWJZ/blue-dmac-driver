@@ -42,15 +42,15 @@ static void engine_regs_init(struct bdma_engine *engine) {
 static int engine_init(struct bdma_dev *bdev, int channel) {
   struct engine_regs *regs;
   struct bdma_engine *engine;
-  u8 *pa_list;
+  u8 *pa_bus_addr;
 
   engine = &bdev->engines[channel];
   regs = bdev->bar0 + BDMA_CHANNEL_REG_BYTES * channel;
-  pa_list = (u8 *)bdev->bar0 +
-            (channel * BDMA_MAX_MR_PAGE_NUM * 2 + BDMA_REG_REGION) * 4;
+  pa_bus_addr = (u8 *)bdev->bar0 +
+                (channel * BDMA_MAX_MR_PAGE_NUM * 2 + BDMA_REG_REGION) * 4;
 
   engine->regs = regs;
-  engine->pa_list = pa_list;
+  engine->pa_bus_addr = pa_bus_addr;
   engine->id = channel;
   engine->channel = channel;
   engine->bdev = bdev;
@@ -79,6 +79,7 @@ static void engine_remove(struct bdma_dev *bdev) {
       dma_free_coherent(&engine->bdev->pdev->dev, sizeof(struct bdma_poll_wb),
                         engine->poll_virt_addr, engine->poll_bus_addr);
     }
+    kfree(engine);
   }
 }
 
@@ -96,24 +97,29 @@ int engines_probe(struct bdma_dev *bdev) {
   return rv;
 };
 
-static void write_pages(struct bdma_engine *engine, int page_idx,
-                        dma_addr_t phy_addr) {
+static void write_page(struct bdma_engine *engine, int page_idx,
+                       dma_addr_t phy_addr) {
   u32 w;
   unsigned int reg_idx = 0;
   pr_info("Debug: new phy_addr : %llx", phy_addr);
+  engine->pa_list[page_idx] = phy_addr;
 
   w = cpu_to_le32(PCI_DMA_L(phy_addr));
   reg_idx = page_idx * 2 + 1;
-  iowrite32(w, engine->pa_list + reg_idx * 4);
-  pr_info("Debug: write register @ %px, low dma addr %x",
-          engine->pa_list + reg_idx * 4, w);
+  iowrite32(w, engine->pa_bus_addr + reg_idx * 4);
+  // pr_info("Debug: write register @ %px, low dma addr %x",
+  //         engine->pa_bus_addr + reg_idx * 4, w);
 
   w = cpu_to_le32(PCI_DMA_H(phy_addr));
   reg_idx = page_idx * 2;
-  iowrite32(w, engine->pa_list + reg_idx * 4);
-  pr_info("Debug: write register @ %px, high dma addr %x",
-          engine->pa_list + reg_idx * 4, w);
+  iowrite32(w, engine->pa_bus_addr + reg_idx * 4);
+  // pr_info("Debug: write register @ %px, high dma addr %x",
+  //         engine->pa_bus_addr + reg_idx * 4, w);
 };
+
+dma_addr_t get_mapped_page(struct bdma_engine *engine, int page_idx) {
+  return engine->pa_list[page_idx];
+}
 
 int memory_register(unsigned long long user_addr, size_t user_len,
                     struct bdma_engine *engine) {
@@ -129,6 +135,8 @@ int memory_register(unsigned long long user_addr, size_t user_len,
   mr = &engine->region;
   mr->head_page = user_addr & PAGE_MASK;
   mr->tail_page = PAGE_ALIGN(user_addr + user_len);
+  pr_info("Debug: user request mem register, user addr: %llx, user length: %d, aligned to page from %llx to %llx\n", 
+          user_addr, user_len, mr->head_page, mr->tail_page);
 
   num_pages = (mr->tail_page - mr->head_page) / PAGE_SIZE;
   if (num_pages > BDMA_MAX_MR_PAGE_NUM) {
@@ -142,24 +150,38 @@ int memory_register(unsigned long long user_addr, size_t user_len,
 
   pinned = pin_user_pages(mr->head_page, num_pages, FOLL_WRITE, pages, NULL);
   if (pinned < num_pages) {
-    kfree(pages);
-    if (pinned > 0)
-      unpin_user_pages(pages, pinned);
     pr_err("Could not pin all requested pages!\n");
-    return -EFAULT;
+    goto pin_err;
   }
 
   for (page_idx = 0; page_idx < num_pages; page_idx++) {
     dma_hdl = dma_map_page(&engine->bdev->pdev->dev, pages[page_idx], 0,
                            PAGE_SIZE, DMA_BIDIRECTIONAL);
-    pr_info("Debug: dma map, page @%px , dma_hdl @%llx \n", pages[page_idx],
+    if (dma_mapping_error(&engine->bdev->pdev->dev, dma_hdl)) {
+      pr_err("DMA mapping error on page%d @ %px", page_idx, pages[page_idx]);
+      goto map_err;
+    }
+    // dma_hdl = (unsigned long long)page_to_phys(pages[page_idx]);
+    pr_info("Debug: dma map, phy @%px , dma_hdl @%llx \n", page_to_phys(pages[page_idx]),
             dma_hdl);
-    write_pages(engine, page_idx, dma_hdl);
+    
+    write_page(engine, page_idx, dma_hdl);
   }
 
   engine->got_registerd_region = 1;
   kfree(pages);
   return 0;
+
+map_err:
+  while (page_idx--) {
+    dma_unmap_page(&engine->bdev->pdev->dev, get_mapped_page(engine, page_idx),
+                   PAGE_SIZE, DMA_BIDIRECTIONAL);
+  };
+pin_err:
+  if (pinned > 0)
+    unpin_user_pages(pages, pinned);
+  kfree(pages);
+  return -EFAULT;
 };
 
 struct bdma_dev *create_bdma_device(const char *mod_name,
@@ -235,7 +257,8 @@ free_bdev:
 
 void remove_bdma_device(struct pci_dev *pdev, void *dev_hndl) {
   struct bdma_dev *bdev = (struct bdma_dev *)dev_hndl;
-  pr_info("Enter bdma device destroy\n");
+  pr_info("Debug: Enter bdma device destroy, got_region:%d\n",
+          bdev->got_regions);
   if (!dev_hndl)
     return;
 
@@ -249,6 +272,7 @@ void remove_bdma_device(struct pci_dev *pdev, void *dev_hndl) {
   bdev->bar0 = NULL;
 
   if (bdev->got_regions) {
+    pr_info("Debug: release regions.\n");
     pci_release_regions(pdev);
   }
 
@@ -265,6 +289,8 @@ int submit_transfer(unsigned long long user_addr, size_t length, u32 control,
   u32 w;
   struct engine_regs *regs = engine->regs;
   struct mem_region *mr = &engine->region;
+  unsigned long long va_offset = 0;
+  int page_idx;
 
   if (user_addr < mr->head_page || user_addr > mr->tail_page ||
       user_addr + length > mr->tail_page) {
@@ -277,10 +303,14 @@ int submit_transfer(unsigned long long user_addr, size_t length, u32 control,
     return -EINVAL;
   }
 
-  w = cpu_to_le32(PCI_DMA_L(user_addr));
+  va_offset = user_addr - engine->region.head_page;
+  page_idx = (user_addr - engine->region.head_page) / PAGE_SIZE;
+  pr_info("Debug: transfer va: %llx, length: %d, expect dma_pa: %llx\n", user_addr, length, engine->pa_list[page_idx] + va_offset % PAGE_SIZE);
+
+  w = cpu_to_le32(PCI_DMA_L(va_offset));
   iowrite32(w, &regs->desc_va_lo);
 
-  w = cpu_to_le32(PCI_DMA_H(user_addr));
+  w = cpu_to_le32(PCI_DMA_H(va_offset));
   iowrite32(w, &regs->desc_va_hi);
 
   w = cpu_to_le32(PCI_DMA_L(length));
