@@ -1,8 +1,10 @@
+#define pr_fmt(fmt) KBUILD_MODNAME ":%s: " fmt, __func__
+
 #include "linux/cdev.h"
+#include "linux/device.h"
 #include "linux/fs.h"
 #include "linux/printk.h"
 #include "linux/types.h"
-#define pr_fmt(fmt) KBUILD_MODNAME ":%s: " fmt, __func__
 
 #include "bdma_cdev.h"
 #include "libbdma.h"
@@ -12,12 +14,14 @@ struct class *g_bdma_class;
 enum cdev_type {
   CHAR_CONTROL,
   CHAR_ENGINE,
+  USER_MMAP,
 };
 
-static const char *const devnode_names[] = {
-    BDMA_NODE_NAME "_control%d",
-    BDMA_NODE_NAME "_c2h_%d",
-};
+static const char *const devnode_names[] = {BDMA_NODE_NAME "_control%d",
+                                            BDMA_NODE_NAME "_c2h_%d",
+                                            BDMA_NODE_NAME "_user_mmap%d"};
+
+/* DMA Register Ctrl Raw Interface*/
 
 static ssize_t ctrl_read(struct file *file, char __user *buf, size_t count,
                          loff_t *pos) {
@@ -30,13 +34,13 @@ static ssize_t ctrl_read(struct file *file, char __user *buf, size_t count,
   if (*pos & 3)
     return -EPROTO;
 
-  reg = bcdev->bdev->bar0 + *pos;
-  pr_info("pointer check: bar0 @ %px, pos %lld, expected %px, reg %px\n",
-          bcdev->bdev->bar0, *pos, bcdev->bdev->bar0 + 4, reg);
+  reg = bcdev->bdev->ctrl_bar + *pos;
+  pr_info("pointer check: ctrl_bar @ %px, pos %lld, expected %px, reg %px\n",
+          bcdev->bdev->ctrl_bar, *pos, bcdev->bdev->ctrl_bar + 4, reg);
 
   if (!reg) {
-    pr_err("Invalid reg of bdma device: bar0: %p, reg:%p\n", bcdev->bdev->bar0,
-           reg);
+    pr_err("Invalid reg of bdma device: ctrl_bar: %p, reg:%p\n",
+           bcdev->bdev->ctrl_bar, reg);
     return -EINVAL;
   }
 
@@ -66,10 +70,10 @@ static ssize_t ctrl_write(struct file *file, const char __user *buf,
   if (*pos & 3)
     return -EPROTO;
 
-  reg = bcdev->bdev->bar0 + *pos;
+  reg = bcdev->bdev->ctrl_bar + *pos;
   if (!reg) {
-    pr_err("Invalid reg of bdma device: bar0: %p, reg:%p\n", bcdev->bdev->bar0,
-           reg);
+    pr_err("Invalid reg of bdma device: ctrl_bar: %p, reg:%p\n",
+           bcdev->bdev->ctrl_bar, reg);
     return -EINVAL;
   }
 
@@ -84,6 +88,8 @@ static ssize_t ctrl_write(struct file *file, const char __user *buf,
   *pos += 4;
   return 4;
 }
+
+/* DMA Engine Start Trans Interface*/
 
 static ssize_t engine_read(struct file *file, char __user *buf, size_t count,
                            loff_t *pos) {
@@ -140,6 +146,27 @@ static ssize_t engine_write(struct file *file, const char __user *buf,
 
   return count;
 };
+
+/* DMA User mmap Interface*/
+
+static int user_bar_mmap(struct file *file, struct vm_area_struct *vma) {
+  unsigned long vsize = vma->vm_end - vma->vm_start;
+  struct bdma_cdev *bcdev = (struct bdma_cdev *)file->private_data;
+
+  if (vsize > BDMA_BAR_SPACE_MAX) {
+    pr_err("Mapping size is too large!\n");
+    return -EINVAL;
+  }
+
+  if (remap_pfn_range(vma, vma->vm_start,
+                      (unsigned long long)bcdev->bdev->user_bar >> PAGE_SHIFT,
+                      vsize, vma->vm_page_prot)) {
+    pr_err("Failed to mmap BAR!\n");
+    return -EAGAIN;
+  }
+
+  return 0;
+}
 
 static int char_open(struct inode *inode, struct file *file) {
   struct bdma_cdev *bcdev;
@@ -216,6 +243,11 @@ static const struct file_operations engine_fops = {.owner = THIS_MODULE,
                                                    .write = engine_write,
                                                    .llseek = char_llseek};
 
+static const struct file_operations mmap_fops = {.owner = THIS_MODULE,
+                                                 .open = char_open,
+                                                 .release = char_close,
+                                                 .mmap = user_bar_mmap};
+
 // Only support ctrl cdev now
 // bdma_control is a raw interface for registers visiting
 static int create_bcdev(struct bdma_dev *bdev, struct bdma_cdev *bcdev, int bar,
@@ -255,6 +287,11 @@ static int create_bcdev(struct bdma_dev *bdev, struct bdma_cdev *bcdev, int bar,
     cdev_init(&bcdev->cdev, &engine_fops);
     idx = engine->channel;
     break;
+  case USER_MMAP:
+    minor = type + 4;
+    cdev_init(&bcdev->cdev, &mmap_fops);
+    idx = 0;
+    break;
   default:
     pr_err("Could not solve type %d char device.\n", type);
     return -EINVAL;
@@ -293,7 +330,7 @@ int bdev_create_interfaces(struct bdma_dev *bdev) {
   if (IS_ERR(g_bdma_class)) {
     rv = PTR_ERR(g_bdma_class);
     pr_err("Failed to create class.\n");
-  };
+  }
 
   rv =
       create_bcdev(bdev, &bdev->ctrl_cdev, 0, CHAR_CONTROL, NULL, g_bdma_class);
@@ -311,18 +348,30 @@ int bdev_create_interfaces(struct bdma_dev *bdev) {
     }
   }
 
+  rv = create_bcdev(bdev, &bdev->mmap_cdev, 0, USER_MMAP, NULL, g_bdma_class);
+  if (rv) {
+    pr_err("create user bar mmap file failed %d\n", rv);
+    return rv;
+  }
   // Maybe we will create more bcdev here
 
   return rv;
 }
 
+static void delete_bcdev(struct bdma_cdev *bcdev) {
+  if (bcdev->sys_device)
+    device_destroy(g_bdma_class, bcdev->cdevno);
+  cdev_del(&bcdev->cdev);
+}
+
 void bdev_destroy_interfaces(struct bdma_dev *bdev) {
-  struct bdma_cdev bcdev = bdev->ctrl_cdev;
+  delete_bcdev(&bdev->ctrl_cdev);
 
-  if (bcdev.sys_device)
-    device_destroy(g_bdma_class, bcdev.cdevno);
+  for (int eg_idx = 0; eg_idx < bdev->c2h_channel_num; eg_idx++) {
+    delete_bcdev(&bdev->engine_cdev[eg_idx]);
+  }
 
-  cdev_del(&bcdev.cdev);
+  delete_bcdev(&bdev->mmap_cdev);
 
   if (bdev->major)
     unregister_chrdev_region(MKDEV(bdev->major, BDMA_MINOR_BASE),

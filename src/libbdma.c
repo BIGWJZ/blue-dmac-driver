@@ -1,11 +1,13 @@
+#define pr_fmt(fmt) KBUILD_MODNAME ":%s: " fmt, __func__
+
 #include "asm-generic/iomap.h"
+#include "asm-generic/pci_iomap.h"
 #include "asm/page_types.h"
 #include "linux/dma-direction.h"
 #include "linux/dma-mapping.h"
 #include "linux/mm.h"
 #include "linux/slab.h"
 #include "linux/types.h"
-#define pr_fmt(fmt) KBUILD_MODNAME ":%s: " fmt, __func__
 
 #include "libbdma.h"
 
@@ -45,8 +47,8 @@ static int engine_init(struct bdma_dev *bdev, int channel) {
   u8 *pa_bus_addr;
 
   engine = &bdev->engines[channel];
-  regs = bdev->bar0 + BDMA_CHANNEL_REG_BYTES * channel;
-  pa_bus_addr = (u8 *)bdev->bar0 +
+  regs = bdev->ctrl_bar + BDMA_CHANNEL_REG_BYTES * channel;
+  pa_bus_addr = (u8 *)bdev->ctrl_bar +
                 (channel * BDMA_MAX_MR_PAGE_NUM * 2 + BDMA_REG_REGION) * 4;
 
   engine->regs = regs;
@@ -135,7 +137,8 @@ int memory_register(unsigned long long user_addr, size_t user_len,
   mr = &engine->region;
   mr->head_page = user_addr & PAGE_MASK;
   mr->tail_page = PAGE_ALIGN(user_addr + user_len);
-  pr_info("Debug: user request mem register, user addr: %llx, user length: %d, aligned to page from %llx to %llx\n", 
+  pr_info("Debug: user request mem register, user addr: %llx, user length: %d, "
+          "aligned to page from %llx to %llx\n",
           user_addr, user_len, mr->head_page, mr->tail_page);
 
   num_pages = (mr->tail_page - mr->head_page) / PAGE_SIZE;
@@ -162,9 +165,9 @@ int memory_register(unsigned long long user_addr, size_t user_len,
       goto map_err;
     }
     // dma_hdl = (unsigned long long)page_to_phys(pages[page_idx]);
-    pr_info("Debug: dma map, phy @%px , dma_hdl @%llx \n", page_to_phys(pages[page_idx]),
-            dma_hdl);
-    
+    pr_info("Debug: dma map, phy @%px , dma_hdl @%llx \n",
+            page_to_phys(pages[page_idx]), dma_hdl);
+
     write_page(engine, page_idx, dma_hdl);
   }
 
@@ -221,9 +224,15 @@ struct bdma_dev *create_bdma_device(const char *mod_name,
     bdev->got_regions = 1;
   }
 
-  bdev->bar0 = pci_ioremap_bar(pdev, 0);
-  if (!bdev->bar0) {
-    pr_err("Could not map BAR0.\n");
+  bdev->ctrl_bar = pci_ioremap_bar(pdev, 0);
+  if (!bdev->ctrl_bar) {
+    pr_err("Could not map ctrl_bar.\n");
+    goto err_map;
+  }
+
+  bdev->user_bar = pci_ioremap_bar(pdev, 1);
+  if (!bdev->user_bar) {
+    pr_err("Could not map user_bar.\n");
     goto err_map;
   }
 
@@ -239,13 +248,14 @@ struct bdma_dev *create_bdma_device(const char *mod_name,
     goto err_mask;
   }
 
-  pr_info("bdma device created successfully, bar0%p, bdev%p, pdev%p\n",
-          bdev->bar0, bdev, pdev);
+  pr_info("bdma device created successfully, ctrl_bar%p, bdev%p, pdev%p\n",
+          bdev->ctrl_bar, bdev, pdev);
 
   return (void *)bdev;
 
 err_mask:
-  pci_iounmap(pdev, bdev->bar0);
+  pci_iounmap(pdev, bdev->ctrl_bar);
+  pci_iounmap(pdev, bdev->user_bar);
 err_map:
   pci_release_regions(pdev);
 err_regions:
@@ -268,8 +278,10 @@ void remove_bdma_device(struct pci_dev *pdev, void *dev_hndl) {
 
   engine_remove(bdev);
 
-  pci_iounmap(pdev, bdev->bar0);
-  bdev->bar0 = NULL;
+  pci_iounmap(pdev, bdev->ctrl_bar);
+  pci_iounmap(pdev, bdev->user_bar);
+  bdev->ctrl_bar = NULL;
+  bdev->user_bar = NULL;
 
   if (bdev->got_regions) {
     pr_info("Debug: release regions.\n");
@@ -305,7 +317,8 @@ int submit_transfer(unsigned long long user_addr, size_t length, u32 control,
 
   va_offset = user_addr - engine->region.head_page;
   page_idx = (user_addr - engine->region.head_page) / PAGE_SIZE;
-  pr_info("Debug: transfer va: %llx, length: %d, expect dma_pa: %llx\n", user_addr, length, engine->pa_list[page_idx] + va_offset % PAGE_SIZE);
+  pr_info("Debug: transfer va: %llx, length: %d, expect dma_pa: %llx\n",
+          user_addr, length, engine->pa_list[page_idx] + va_offset % PAGE_SIZE);
 
   w = cpu_to_le32(PCI_DMA_L(va_offset));
   iowrite32(w, &regs->desc_va_lo);

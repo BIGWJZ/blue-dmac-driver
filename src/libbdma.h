@@ -44,6 +44,8 @@
 #define BDMA_ENGINE_WRITE (1)
 #define BDMA_ENGINE_MR (2)
 
+#define BDMA_BAR_SPACE_MAX (1024 * 1024) // 1M Bytes BAR
+
 #define MAGIC_CHAR 0xBBBBBBBBUL
 
 struct bdma_cdev {
@@ -102,13 +104,17 @@ struct bdma_dev {
   int major;
   int c2h_channel_num;
 
-  void __iomem *bar0;
+  void __iomem *ctrl_bar;
+  void __iomem *user_bar;
+
   int got_regions;
   int regions_in_use;
 
   struct bdma_cdev ctrl_cdev; /* character device structures */
   struct bdma_cdev engine_cdev[BDMA_CHANNEL_NUM_MAX];
-  dev_t bdevno;
+  struct bdma_cdev mmap_cdev;
+
+  dev_t bdevno; /* Not support multi bdma now*/
 
   struct bdma_engine engines[BDMA_CHANNEL_NUM_MAX];
 };
