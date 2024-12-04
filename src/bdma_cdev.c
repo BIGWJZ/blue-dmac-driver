@@ -34,7 +34,11 @@ static ssize_t ctrl_read(struct file *file, char __user *buf, size_t count,
   if (*pos & 3)
     return -EPROTO;
 
-  reg = bcdev->bdev->ctrl_bar + *pos;
+  if (bcdev->bar == 0)
+    reg = bcdev->bdev->ctrl_bar + *pos;
+  else
+    reg = bcdev->bdev->user_bar + *pos;
+
   pr_info("pointer check: ctrl_bar @ %px, pos %lld, expected %px, reg %px\n",
           bcdev->bdev->ctrl_bar, *pos, bcdev->bdev->ctrl_bar + 4, reg);
 
@@ -70,7 +74,11 @@ static ssize_t ctrl_write(struct file *file, const char __user *buf,
   if (*pos & 3)
     return -EPROTO;
 
-  reg = bcdev->bdev->ctrl_bar + *pos;
+  if (bcdev->bar == 0)
+    reg = bcdev->bdev->ctrl_bar + *pos;
+  else
+    reg = bcdev->bdev->user_bar + *pos;
+
   if (!reg) {
     pr_err("Invalid reg of bdma device: ctrl_bar: %p, reg:%p\n",
            bcdev->bdev->ctrl_bar, reg);
@@ -150,7 +158,9 @@ static ssize_t engine_write(struct file *file, const char __user *buf,
 /* DMA User mmap Interface*/
 
 static int user_bar_mmap(struct file *file, struct vm_area_struct *vma) {
+  int rv = 0;
   unsigned long vsize = vma->vm_end - vma->vm_start;
+  unsigned long phy_addr;
   struct bdma_cdev *bcdev = (struct bdma_cdev *)file->private_data;
 
   if (vsize > BDMA_BAR_SPACE_MAX) {
@@ -158,9 +168,22 @@ static int user_bar_mmap(struct file *file, struct vm_area_struct *vma) {
     return -EINVAL;
   }
 
-  if (remap_pfn_range(vma, vma->vm_start,
-                      (unsigned long long)bcdev->bdev->user_bar >> PAGE_SHIFT,
-                      vsize, vma->vm_page_prot)) {
+  phy_addr = pci_resource_start(bcdev->bdev->pdev, bcdev->bar);
+
+  /*
+   * pages must not be cached as this would result in cache line sized
+   * accesses to the end point
+   */
+  vma->vm_page_prot = pgprot_noncached(vma->vm_page_prot);
+  /*
+   * prevent touching the pages (byte access) for swap-in,
+   * and prevent the pages from being swapped out
+   */
+  vma->vm_flags |= (VM_IO | VM_DONTEXPAND | VM_DONTDUMP);
+
+  rv = io_remap_pfn_range(vma, vma->vm_start, phy_addr >> PAGE_SHIFT, vsize,
+                          vma->vm_page_prot);
+  if (rv) {
     pr_err("Failed to mmap BAR!\n");
     return -EAGAIN;
   }
@@ -246,6 +269,8 @@ static const struct file_operations engine_fops = {.owner = THIS_MODULE,
 static const struct file_operations mmap_fops = {.owner = THIS_MODULE,
                                                  .open = char_open,
                                                  .release = char_close,
+                                                 .read = ctrl_read,
+                                                 .write = ctrl_write,
                                                  .mmap = user_bar_mmap};
 
 // Only support ctrl cdev now
@@ -359,12 +384,21 @@ int bdev_create_interfaces(struct bdma_dev *bdev) {
 }
 
 static void delete_bcdev(struct bdma_cdev *bcdev) {
+  if (!bcdev) {
+    pr_err("Invalid bdma_cdev");
+    return;
+  }
   if (bcdev->sys_device)
     device_destroy(g_bdma_class, bcdev->cdevno);
   cdev_del(&bcdev->cdev);
 }
 
 void bdev_destroy_interfaces(struct bdma_dev *bdev) {
+  if (!bdev) {
+    pr_err("Invalid bdma_dev in bdev_destroy_interfaces");
+    return;
+  }
+
   delete_bcdev(&bdev->ctrl_cdev);
 
   for (int eg_idx = 0; eg_idx < bdev->c2h_channel_num; eg_idx++) {
@@ -372,6 +406,11 @@ void bdev_destroy_interfaces(struct bdma_dev *bdev) {
   }
 
   delete_bcdev(&bdev->mmap_cdev);
+
+  if (g_bdma_class) {
+    class_destroy(g_bdma_class);
+    g_bdma_class = NULL;
+  }
 
   if (bdev->major)
     unregister_chrdev_region(MKDEV(bdev->major, BDMA_MINOR_BASE),

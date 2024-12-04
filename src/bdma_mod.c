@@ -98,10 +98,10 @@ static void bdma_remove(struct pci_dev *pdev) {
   if (!bdev)
     return;
 
+  bdev_destroy_interfaces(bdev);
+
   remove_bdma_device(pdev, bdev);
   dev_set_drvdata(&pdev->dev, NULL);
-
-  bdev_destroy_interfaces(bdev);
 }
 
 // TODO

@@ -75,13 +75,17 @@ static void engine_remove(struct bdma_dev *bdev) {
   int idx;
   struct bdma_engine *engine;
 
+  if (!bdev) {
+    pr_err("Bad bdma_dev value of engine_remove!");
+    return;
+  }
+
   for (idx = 0; idx < bdev->c2h_channel_num; idx++) {
     engine = &bdev->engines[idx];
     if (engine->poll_virt_addr) {
       dma_free_coherent(&engine->bdev->pdev->dev, sizeof(struct bdma_poll_wb),
                         engine->poll_virt_addr, engine->poll_bus_addr);
     }
-    kfree(engine);
   }
 }
 
@@ -103,7 +107,6 @@ static void write_page(struct bdma_engine *engine, int page_idx,
                        dma_addr_t phy_addr) {
   u32 w;
   unsigned int reg_idx = 0;
-  pr_info("Debug: new phy_addr : %llx", phy_addr);
   engine->pa_list[page_idx] = phy_addr;
 
   w = cpu_to_le32(PCI_DMA_L(phy_addr));
@@ -137,9 +140,10 @@ int memory_register(unsigned long long user_addr, size_t user_len,
   mr = &engine->region;
   mr->head_page = user_addr & PAGE_MASK;
   mr->tail_page = PAGE_ALIGN(user_addr + user_len);
-  pr_info("Debug: user request mem register, user addr: %llx, user length: %d, "
-          "aligned to page from %llx to %llx\n",
-          user_addr, user_len, mr->head_page, mr->tail_page);
+  pr_info(
+      "Debug: user request mem register, user addr: %llx, user length: %ld, "
+      "aligned to page from %llx to %llx\n",
+      user_addr, user_len, mr->head_page, mr->tail_page);
 
   num_pages = (mr->tail_page - mr->head_page) / PAGE_SIZE;
   if (num_pages > BDMA_MAX_MR_PAGE_NUM) {
@@ -266,25 +270,34 @@ free_bdev:
 };
 
 void remove_bdma_device(struct pci_dev *pdev, void *dev_hndl) {
-  struct bdma_dev *bdev = (struct bdma_dev *)dev_hndl;
-  pr_info("Debug: Enter bdma device destroy, got_region:%d\n",
-          bdev->got_regions);
-  if (!dev_hndl)
+  struct bdma_dev *bdev;
+  if (!dev_hndl) {
+    pr_err("Invalid dev_hndl");
     return;
+  }
+
+  bdev = (struct bdma_dev *)dev_hndl;
 
   if (bdev->pdev != pdev) {
     pr_err("Mismatch of bdma close\n");
+    return;
   }
 
   engine_remove(bdev);
 
-  pci_iounmap(pdev, bdev->ctrl_bar);
-  pci_iounmap(pdev, bdev->user_bar);
-  bdev->ctrl_bar = NULL;
-  bdev->user_bar = NULL;
+  if (bdev->ctrl_bar) {
+    pci_iounmap(pdev, bdev->ctrl_bar);
+    bdev->ctrl_bar = NULL;
+  }
+
+  if (bdev->user_bar) {
+    pci_iounmap(pdev, bdev->user_bar);
+    bdev->user_bar = NULL;
+  }
+
+  pr_info("remove bdma device, pdev 0x%p, bdev 0x%p\n", pdev, bdev);
 
   if (bdev->got_regions) {
-    pr_info("Debug: release regions.\n");
     pci_release_regions(pdev);
   }
 
@@ -293,7 +306,6 @@ void remove_bdma_device(struct pci_dev *pdev, void *dev_hndl) {
   }
 
   kfree(bdev);
-  pr_info("remove bdma device, pdev 0x%p, bdev 0x%p\n", pdev, bdev);
 };
 
 int submit_transfer(unsigned long long user_addr, size_t length, u32 control,
