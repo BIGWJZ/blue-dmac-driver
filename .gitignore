@@ -7,3 +7,4 @@
 *.mod.c
 .cache
 compile_commands.json
+/rdma/
