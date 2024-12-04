@@ -179,7 +179,8 @@ static int user_bar_mmap(struct file *file, struct vm_area_struct *vma) {
    * prevent touching the pages (byte access) for swap-in,
    * and prevent the pages from being swapped out
    */
-  vma->vm_flags |= (VM_IO | VM_DONTEXPAND | VM_DONTDUMP);
+  // vma->vm_flags |= (VM_IO | VM_DONTEXPAND | VM_DONTDUMP);
+  vm_flags_set(vma, VM_IO | VM_DONTEXPAND | VM_DONTDUMP);
 
   rv = io_remap_pfn_range(vma, vma->vm_start, phy_addr >> PAGE_SHIFT, vsize,
                           vma->vm_page_prot);
@@ -351,7 +352,7 @@ int bdev_create_interfaces(struct bdma_dev *bdev) {
   int rv = 0;
   int eg_idx;
 
-  g_bdma_class = class_create(THIS_MODULE, BDMA_NODE_NAME);
+  g_bdma_class = class_create(BDMA_NODE_NAME);
   if (IS_ERR(g_bdma_class)) {
     rv = PTR_ERR(g_bdma_class);
     pr_err("Failed to create class.\n");

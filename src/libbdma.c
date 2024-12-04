@@ -155,7 +155,7 @@ int memory_register(unsigned long long user_addr, size_t user_len,
   if (!pages)
     return -ENOMEM;
 
-  pinned = pin_user_pages(mr->head_page, num_pages, FOLL_WRITE, pages, NULL);
+  pinned = pin_user_pages(mr->head_page, num_pages, FOLL_WRITE, pages);
   if (pinned < num_pages) {
     pr_err("Could not pin all requested pages!\n");
     goto pin_err;

@@ -8,8 +8,8 @@
 #include <time.h>
 
 #define DEVICE_PATH "/dev/bdma_c2h_0"
-#define MR_SIZE (8192)
-#define TEST_SIZE (128)
+#define MR_SIZE (16 * 1024)
+#define TEST_SIZE (MR_SIZE / 2)
 
 enum control_code { BDMA_READ, BDMA_WRITE, BDMA_MR };
 
@@ -75,7 +75,7 @@ int main(int argc, char *argv[]) {
   struct timespec start, end;
   int rv = 0;
   // Do not trans larger than 512, will be fix in next verison
-  size_t trans_len = 1;
+  size_t trans_len = 2500;
 
   if (trans_len > TEST_SIZE) {
     perror("trans_len should be small than TEST_SIZE");
@@ -104,10 +104,10 @@ int main(int argc, char *argv[]) {
   printf("Dma Read [ %p : %p], data:%c \n", src_ptr, src_ptr + trans_len , *src_ptr);
   rv = test_transfer(fd, src_ptr, trans_len, BDMA_READ);
 
+  clock_gettime(CLOCK_MONOTONIC, &start);
+
   printf("Dma Write [ %p : %p], origin data:%c \n", dest_ptr, last_ptr + 1, *dest_ptr);
   rv = test_transfer(fd, dest_ptr, trans_len, BDMA_WRITE);
-
-  clock_gettime(CLOCK_MONOTONIC, &start);
 
   clock_gettime(CLOCK_MONOTONIC, &end);
   // Just for testing, done flag is not implemented now
